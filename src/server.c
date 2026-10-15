@@ -94,7 +94,20 @@ void worker_process(int server_fd) {
                     printf("[SERVER] client [%d] has been added\n", client_fd); 
                 }
             } else {
-                printf("some sockets have activity\n");
+                char buffer[4096];
+                ssize_t bytes_read = recv(server_fd, buffer, sizeof(buffer), 0);
+                if (bytes_read > 0) {
+
+                } else {
+                    if (bytes_read == 0) {
+                        printf("client shutdown gracefully\n");
+                    } else {
+                        printf("Connection interrupted");
+                    }
+
+                    close(fd);
+                    return;
+                }
             }
         }
     }
