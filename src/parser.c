@@ -1,4 +1,5 @@
 #include "../include/parser.h"
+#include <limits.h>
 
 
 int parse_request_line(HttpRequest* request, char* line) {
@@ -8,6 +9,7 @@ int parse_request_line(HttpRequest* request, char* line) {
     if (!space) return -1;
 
     size_t len_method = space - line;
+    if (sizeof(request->method) <= len_method) return -1;
     memcpy(request->method, line, len_method);
     request->method[len_method] = '\0';
 
@@ -16,6 +18,7 @@ int parse_request_line(HttpRequest* request, char* line) {
     if (!next_space) return -1;
 
     size_t len_uri = next_space - uri_start;
+    if (sizeof(request->uri) <= len_uri) return -1;
     memcpy(request->uri, uri_start, len_uri);
     request->uri[len_uri] = '\0';
 
@@ -38,35 +41,36 @@ int parse_http_request(HttpRequest* http, char* request) {
     char* line_end = strstr(request, "\r\n");
     if (!line_end) return -1;
 
+    char* next_line = line_end + 2;
+
     *line_end = '\0';
     if (parse_request_line(http, request) != 0) {
         return -1;
     }
-    line_end = "\r";
 
-    char* cursor = line_end + 2;
+    char* cursor = next_line;
 
     while (cursor && *cursor != '\r' && *cursor != '\n' && *cursor != '\0') {
-        line_end = strstr(request, "\r\n");
+        line_end = strstr(cursor, "\r\n");
         if (!line_end) return -1;
 
         *line_end = '\0';
-        char* colon = strchr(request, ':');
+        char* colon = strchr(cursor, ':');
         if (colon) {
             *colon = '\0';
             char* key = cursor;
             char* value = colon + 1;
 
-            while (*value == ' ') value++;
+            while (*value == ' ' || *value == '\t') value++;
             
             if (http->header_parsed_count < MAX_HEADERS) {
                 snprintf(http->headers[http->header_parsed_count].key, sizeof(http->headers[http->header_parsed_count].key), "%s", key);
                 snprintf(http->headers[http->header_parsed_count].value, sizeof(http->headers[http->header_parsed_count].value), "%s", value);
                 http->header_parsed_count++;
+            } else {
+                return -1;
             }
-            *colon = ':';
         }
-        line_end = "\r";
         cursor = line_end + 2;
     }
 
@@ -92,7 +96,7 @@ int get_content_length(HttpRequest* http) {
 
             long value = strtol(http->headers[i].value, &end, 10);
 
-            if (errno == ERANGE || end == http->headers[i].value || *end == '\0' || *end == '\r' || *end == '\n' || value < 0) {
+            if (errno == ERANGE || end == http->headers[i].value || *end != '\0' || value < 0 || value > INT_MAX) {
                 return -1;
             }
             return (int)value;
