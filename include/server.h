@@ -14,6 +14,7 @@
 #include <fcntl.h>
 #include <sys/socket.h>
 
+#include "client.h"
 #define MAX_EVENTS 64
 #define BUF_SIZE 4096
 
@@ -34,5 +35,9 @@ typedef struct {
 int set_non_blocking(int fd);
 
 void worker_process(int server_fd);
+int handle_client(Connection_t* conn);
+
+int conn_send(Connection_t* conn);
+
 
 #endif
