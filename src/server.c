@@ -1,27 +1,4 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
-#include <string.h>
-#include <errno.h>
-
-#include <arpa/inet.h>
-#include <sys/wait.h>
-#include <signal.h>
-#include <sys/epoll.h>
-#include <fcntl.h>
-#include <sys/socket.h>
-
-#define PORT 8080
-#define MAX_EVENTS 64
-#define WORKER_COUNT 10
-
-volatile sig_atomic_t keep_running = 1;
-
-void handle_sigint(int sig) {
-    (void)sig;
-    keep_running = 0;
-    _exit(EXIT_SUCCESS);
-}
+#include "../include/server.h"
 
 int set_non_blocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
@@ -30,6 +7,78 @@ int set_non_blocking(int fd) {
         exit(EXIT_FAILURE);
     }
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
+static void conn_close(int epfd, Connection_t* conn) {
+    epoll_ctl(epfd, EPOLL_CTL_DEL, conn->fd, NULL);
+    close(conn->fd);
+    free(conn);
+}
+
+static int conn_recv(int epfd, Connection_t *conn) {
+    while(1) {
+        size_t remaining = BUF_SIZE - conn->in_offset;
+        if (remaining == 0) {
+            fprintf(stderr, "Buffer full for %d", conn->fd);
+            return -1;
+        }
+
+        ssize_t n = recv(conn->fd, conn->in_buf + conn->in_offset, remaining, 0);
+
+        if (n > 0) { 
+            conn->in_offset += (size_t) n;
+        } else if (n == 0) {
+            return -1;
+        } else {
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) return 1;
+            perror("recv faild");
+            return -1;
+        }
+    }
+}
+
+static void accpet_client(int epfd, int server_fd) {
+
+    while (1) { 
+        struct sockaddr_in addr_client;
+        socklen_t len_addr_client = sizeof(addr_client);
+
+        int client_fd = accept(server_fd, (struct sockaddr*)&addr_client, &len_addr_client);
+        if (client_fd < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+            if (errno == EINTR) continue;
+            perror("accept failed");
+            continue;
+        }
+
+        if (set_non_blocking(client_fd) < 0) {
+            perror("set_non_blocking failed");
+            close(client_fd);
+            continue;
+        }
+
+        Connection_t *client_conn = calloc(1, sizeof(Connection_t));
+        if (!client_conn) {
+            perror("malloc failed"); 
+            close(client_fd);
+            continue;
+        }
+        client_conn->fd = client_fd;
+        client_conn->event = EPOLLIN;
+
+        struct epoll_event ev;
+        ev.events = EPOLLIN | EPOLLET;
+        ev.data.ptr = client_conn;
+
+        if (epoll_ctl(epfd, EPOLL_CTL_ADD, client_fd, &ev) < 0) {
+            perror("epoll_ctl failed");
+            close(client_fd);
+            continue;
+        }
+
+        printf("[SERVER] client [%d] has been added\n", client_fd); 
+    }
 }
 
 void worker_process(int server_fd) {
@@ -41,7 +90,7 @@ void worker_process(int server_fd) {
     }
 
     struct epoll_event ev;
-    ev.data.fd = server_fd;
+    ev.data.ptr = NULL;
     ev.events = EPOLLIN | EPOLLET | EPOLLEXCLUSIVE;
 
     if (epoll_ctl(epfd, EPOLL_CTL_ADD, server_fd, &ev) < 0) {
@@ -52,7 +101,7 @@ void worker_process(int server_fd) {
 
     struct epoll_event events[MAX_EVENTS];
     
-    while (keep_running) {
+    while (1) {
         int n = epoll_wait(epfd, events, MAX_EVENTS, -1);
         if (n < 0) {
             if (errno == EINTR) continue;
@@ -60,128 +109,27 @@ void worker_process(int server_fd) {
             break;
         }
         for (int i = 0; i < n; i++) {
-            int fd = events[i].data.fd;
+            Connection_t *conn = events[i].data.ptr;   
 
-            if (fd == server_fd) {
-                while (1) { 
-                    struct sockaddr_in addr_client;
-                    socklen_t len_addr_client = sizeof(addr_client);
-
-                    int client_fd = accept(server_fd, (struct sockaddr*)&addr_client, &len_addr_client);
-                    if (client_fd < 0) {
-                        if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-                        if (errno == EINTR) continue;
-                        perror("accept failed");
-                        continue;
-                    }
-
-                    if (set_non_blocking(client_fd) < 0) {
-                        perror("set_non_blocking failed");
-                        close(client_fd);
-                        continue;
-                    }
-
-                    struct epoll_event ev;
-                    ev.events = EPOLLIN | EPOLLET;
-                    ev.data.fd = client_fd;
-
-                    if (epoll_ctl(epfd, EPOLL_CTL_ADD, client_fd, &ev) < 0) {
-                        perror("epoll_ctl failed");
-                        close(client_fd);
-                        continue;
-                    }
-
-                    printf("[SERVER] client [%d] has been added\n", client_fd); 
-                }
-            } else {
-                char buffer[4096];
-                ssize_t bytes_read = recv(server_fd, buffer, sizeof(buffer), 0);
-                if (bytes_read > 0) {
-
-                } else {
-                    if (bytes_read == 0) {
-                        printf("client shutdown gracefully\n");
-                    } else {
-                        printf("Connection interrupted");
-                    }
-
-                    close(fd);
-                    return;
-                }
+            if (conn == NULL) {
+                accpet_client(epfd, server_fd);
+                continue;
             }
+
+            uint32_t e = events[i].events;
+            int rc = 0;
+
+            if (e & (EPOLLERR | EPOLLHUP)) {
+                rc = -1;
+            } else {
+                if (e & EPOLLIN) rc = conn_recv(epfd, conn);
+                handle_client(conn);
+            }
+            
+            if (rc < 0) conn_close(epfd, conn);
         }
     }
+    close(epfd);
+    close(server_fd);
 };
 
-int main() {
-    
-    struct sigaction sa_int;
-    sa_int.sa_handler = handle_sigint;
-    sigemptyset(&sa_int.sa_mask);
-    sa_int.sa_flags = 0;
-    if (sigaction(SIGINT, &sa_int, NULL) < 0) {
-        perror("sigaction failed");
-        exit(EXIT_FAILURE);
-    }
-
-
-    printf("Initializing socket...\n");
-    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_fd < 0) {
-        perror("socket failed");
-        exit(EXIT_FAILURE);
-    }
-
-    int opt = 1;
-    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
-        perror("setsockopt failed");
-        close(server_fd);
-        exit(EXIT_FAILURE);
-    }
-
-    if (set_non_blocking(server_fd) < 0) {
-        perror("set_non_blocking failed");
-        close(server_fd);
-        exit(EXIT_FAILURE);
-    }
-
-    struct sockaddr_in addr_server;
-    memset(&addr_server, 0, sizeof(addr_server));
-    addr_server.sin_family = AF_INET;
-    addr_server.sin_addr.s_addr = INADDR_ANY;
-    addr_server.sin_port = htons(PORT);
-
-    if (bind(server_fd, (struct sockaddr*)&addr_server, sizeof(addr_server)) < 0) {
-        perror("bind failed");
-        close(server_fd);
-        exit(EXIT_FAILURE);
-    }
-    printf("bind Succeeded\n");
-
-    if (listen(server_fd, 10) < 0) {
-        perror("listen failed");
-        close(server_fd);
-        exit(EXIT_FAILURE);
-    }
-    printf("listen Succeeded\n");
-
-    pid_t workers[WORKER_COUNT];
-    for(int i = 0; i < WORKER_COUNT; i++) {
-        pid_t pid = fork();
-        if (pid < 0) {
-            perror("fork failed");
-            exit(EXIT_FAILURE);
-        } else if (pid == 0) {
-            worker_process(server_fd);
-        } else {
-            workers[i] = pid;
-        }
-    }
-
-    for (int i = 0; i < WORKER_COUNT; i++) {
-        wait(NULL);
-    }
-
-    close(server_fd);
-    return 0;
-}
