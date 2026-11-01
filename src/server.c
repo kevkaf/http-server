@@ -15,7 +15,7 @@ static void conn_close(int epfd, Connection_t* conn) {
     free(conn);
 }
 
-static int conn_recv(int epfd, Connection_t *conn) {
+static int conn_recv(Connection_t *conn) {
     while(1) {
         size_t remaining = BUF_SIZE - conn->in_offset;
         if (remaining == 0) {
@@ -122,7 +122,7 @@ void worker_process(int server_fd) {
             if (e & (EPOLLERR | EPOLLHUP)) {
                 rc = -1;
             } else {
-                if (e & EPOLLIN) rc = conn_recv(epfd, conn);
+                if (e & EPOLLIN) rc = conn_recv(conn);
                 handle_client(conn);
             }
             
@@ -131,5 +131,5 @@ void worker_process(int server_fd) {
     }
     close(epfd);
     close(server_fd);
-};
+}
 
