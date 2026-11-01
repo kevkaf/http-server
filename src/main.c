@@ -96,7 +96,7 @@ int main() {
     }
 
     for (int i = 0; i < WORKER_COUNT; i++) {
-        wait(NULL);
+        waitpid(workers[i], NULL, 0);
     }
 
     close(server_fd);
