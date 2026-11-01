@@ -1,45 +1,41 @@
 TARGET	:= bin/http
-TEST_TARGET	:= bin/tests
+
 SRC_DIR	:= src
-INC_DIR	:= include
-TEST_DIR	:= tests
+INCLUDE_DIR	:= include
 BUILD_DIR	:= build
-OBJ_DIR	:= $(BUILD_DIR)/obj	
+OBJS_DIR	:= $(BUILD_DIR)/obj
 
 
-CC	:=gcc
-CFLAGS	:= -Wall -Wextra -Werror -g -I$(INC_DIR)
-
+CC	:= gcc
+CFLAGS	:= -Wall -Wextra -Werror -pedantic -g -I$(INCLUDE_DIR)
 
 SRCS	:= $(wildcard $(SRC_DIR)/*.c)
-OBJS	:= $(SRCS:$(SRC_DIR)/*.c=$(OBJ_DIR)/%.o)
+OBJS	:= $(patsubst $(SRC_DIR)/%.c, $(OBJS_DIR)/%.o, $(SRCS))
 
-TESTS_SRCS	:= $(wildcard $(TEST_DIR)/*.c)
-TESTS_OBJS	:= $(OBJ_DIR)/parser.o $(TESTS_SRCS:$(TEST_DIR)/%.c=$(OBJ_DIR)/%.o)
+.PHONY: all clean fclean re
 
-
-.PHONY: all
 all: $(TARGET)
 
 
 $(TARGET): $(OBJS)
 	@mkdir -p $(dir $@)
-	$(CC) $^ -o $@
+	$(CC) $(CFLAGS) $^ -o $@
+	@echo "Built successfully: $@"
 
 
-.PHONY: test
-test: $(TEST_TARGET)
-	@echo "========================================"
-	@echo " Running HTTP Parser Tests... "
-	@echo "========================================"
-	@./$(TEST_TARGET)
-
-# Link the test runner binary
-$(TEST_TARGET): $(TEST_OBJS)
+$(OBJS_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
+	$(CC) $(CFLAGS) -c $< -o $@
+	@echo "Built successfully: $@"
 
 
-.PHONY: clean
 clean: 
-	rm -rf $(BUILD_DIR) bin/
+	@rm -rf $(BUILD_DIR)
+	@echo "Clean object and dependency files"
+	
+fclean:
+	@rm -rf bin
+	@echo "Removed compiled binaries"
+
+
+re: fclean all
