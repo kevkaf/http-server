@@ -15,6 +15,25 @@ static void conn_close(int epfd, Connection_t* conn) {
     free(conn);
 }
 
+static int conn_update_events(int epfd, Connection_t *conn) {
+    uint32_t wanted = EPOLLIN | EPOLLET | (conn->want_write ? EPOLLOUT : 0);
+
+    if (wanted == conn->event) return 0;
+
+    struct epoll_event ev;
+    ev.events = wanted;
+    ev.data.ptr = conn;
+
+    if (epoll_ctl(epfd, EPOLL_CTL_MOD, conn->fd, &ev) < 0) {
+        perror("epoll_ctl MOD failed");
+        return -1;
+    }
+
+    conn->event = wanted;
+
+    return 0;
+}
+
 static int conn_recv(Connection_t *conn) {
     while(1) {
         size_t remaining = BUF_SIZE - conn->in_offset;
@@ -65,7 +84,8 @@ static void accpet_client(int epfd, int server_fd) {
             continue;
         }
         client_conn->fd = client_fd;
-        client_conn->event = EPOLLIN;
+        client_conn->event = EPOLLIN | EPOLLET;
+        client_conn->file_fd = -1;
 
         struct epoll_event ev;
         ev.events = EPOLLIN | EPOLLET;
@@ -117,16 +137,20 @@ void worker_process(int server_fd) {
             }
 
             uint32_t e = events[i].events;
-            int rc = 0;
+            int closing = 0;
 
             if (e & (EPOLLERR | EPOLLHUP)) {
-                rc = -1;
-            } else {
-                if (e & EPOLLIN) rc = conn_recv(conn);
-                handle_client(conn);
+                closing = -1;
+            } else if (!conn->want_write &&  conn->in_offset > 0) {
+                if (handle_client(conn) < 0) closing = 1;
+            }
+
+            if (!closing && (e & EPOLLIN)) {
+                if (conn_recv(conn) < 0) closing = 1;
+                if (handle_client(conn) < 0) closing = 1;
             }
             
-            if (rc < 0) conn_close(epfd, conn);
+            if (closing || conn_update_events(epfd, conn) < 0) conn_close(epfd, conn);
         }
     }
     close(epfd);
