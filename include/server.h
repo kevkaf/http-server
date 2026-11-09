@@ -29,6 +29,12 @@ typedef struct {
     char out_buf[BUF_SIZE];
     size_t out_size;
     size_t out_offset;
+
+    int file_fd;
+    off_t file_size;
+    off_t file_off;
+
+    int want_write;
 } Connection_t;
 
 
