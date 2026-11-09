@@ -1,6 +1,9 @@
 
 #include "../include/client.h"
 #include "../include/server.h"
+#include "../include/parser.h"
+
+#include <sys/sendfile.h>
 
 typedef enum {
     GET_METHOD,
@@ -32,12 +35,16 @@ static const char* get_mime_type(const char* filepath) {
     return "application/octet-stream";
 }
 
+static void conn_reset_file(Connection_t *conn) {
+    if (conn->file_fd > 0) close(conn->file_fd);
+
+    conn->file_fd = -1;
+    conn->file_size = 0;
+    conn->file_off = 0;
+}
+
 int conn_send(Connection_t* conn) {
-    while(1) {
-        if (conn->out_offset >= conn->out_size) {
-            conn->out_offset = conn->out_size = 0;
-            return 0;
-        }
+    while(conn->out_offset < conn->out_size) {
 
         ssize_t n = send(conn->fd, conn->out_buf + conn->out_offset, conn->out_size - conn->out_offset, 0);
 
@@ -47,11 +54,40 @@ int conn_send(Connection_t* conn) {
             return -1; 
         } else {
             if (errno == EINTR) continue;
-            if (errno == EAGAIN || errno == EWOULDBLOCK) return 1;
-            perror("send failed");
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                conn->want_write = 1;
+                return 1; 
+            }
+            if (errno != EPIPE && errno != ECONNRESET) perror("send failed");
             return -1;
         }
     }
+    conn->out_offset = conn->out_size = 0;
+
+    while (conn->file_fd >= 0 && conn->file_off < conn->file_size) {
+
+        size_t remaining = (size_t)(conn->file_size - conn->file_off);
+        ssize_t n = sendfile(conn->fd, conn->file_fd, &conn->file_off, remaining);
+ 
+        if (n > 0) {
+            continue;
+        } else if (n == 0) {
+            fprintf(stderr, "file shrank while sending on fd %d\n", conn->fd);
+            return -1;
+        } else {
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                conn->want_write = 1;
+                return 1;
+            }
+            if (errno != EPIPE && errno != ECONNRESET) perror("sendfile failed");
+            return -1;
+        }
+    }
+ 
+    conn_reset_file(conn);
+    conn->want_write = 0;
+    return 0;
 }
 
 static void fill_error_response(Connection_t *conn, const char *status_line, const char *body) {
@@ -133,18 +169,13 @@ static void handle_get(Connection_t *conn, const char* uri) {
 int handle_client(Connection_t *conn) {
     if (!conn) return -1;
 
-    char method_buf[16] = {0};
-    char uri_buf[256] = {0};
+    HttpRequest http = {0};
 
-    if (sscanf(conn->in_buf, "%15s %255s", method_buf, uri_buf) < 2) {
-        fill_error_response(conn, "400 Bad Request", "400 Bad Request");
-        conn->in_offset = 0;
-        return 0;
-    }
+    parse_http_request(&http, conn->in_buf);
 
-    switch (get_method(method_buf)) {
+    switch (get_method(http.method)) {
         case GET_METHOD:
-            handle_get(conn, uri_buf);
+            handle_get(conn, http.uri);
             break;
 
         case POST_METHOD:
